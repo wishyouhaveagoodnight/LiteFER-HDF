@@ -1,0 +1,19 @@
+#数据集配置
+dataset:
+  name: 'fer2013'  # fer2013 | ckplus | rafdb
+  root_dir: '/path/to/dataset'
+  csv_path: '/path/to/labels.csv'  #仅RAF-DB需要
+  
+#训练参数
+training:
+  batch_size: 64
+  epochs: 15
+  lr: 0.0004
+  weight_decay: 1e-4
+  device: 'cuda'  #自动检测
+  
+#模型参数
+model:
+  num_classes: 7
+  alpha: 0.75
+  d_model: 128
