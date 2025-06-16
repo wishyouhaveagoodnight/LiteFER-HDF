@@ -75,50 +75,87 @@ class TransformerUnit(nn.Module):
 
         return x
 
-# --------------------------- 层级融合模块 ---------------------------
+# --------------------------- 局部与全局分支 ---------------------------
 
-# --------------------------- 新增模块 ---------------------------
+class LocalBranch(nn.Module):
+    """可变形卷积+通道注意力分支"""
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        # 可变形卷积
+        self.deform_conv = DeformConv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        # 标准化与ReLU
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        # 通道注意力
+        self.channel_att = ChannelAttention(out_channels)
+
+    def forward(self, x):
+        x = self.deform_conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        return self.channel_att(x) * x  # 加权
+
+class GlobalBranch(nn.Module):
+    """轻量Transformer+空间注意力分支"""
+    def __init__(self, in_channels, d_model=128):
+        super().__init__()
+        # 1x1卷积
+        self.conv = nn.Conv2d(in_channels, d_model, kernel_size=1)
+        self.bn = nn.BatchNorm2d(d_model)
+        self.relu = nn.ReLU(inplace=True)
+        # 轻量Transformer单元
+        self.transformer = TransformerUnit(d_model)
+        # 空间注意力
+        self.spatial_att = SpatialAttention()
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        x = self.transformer(x)
+        return self.spatial_att(x) * x
+
+# --------------------------- 自适应融合模块 ---------------------------
 class AdaptiveFusion(nn.Module):
-     def __init__(self, channels):
-         super().__init__()
-         self.channel_att = ChannelAttention(channels)
-         self.spatial_att = SpatialAttention()
-         self.global_weight = nn.Parameter(torch.tensor(0.5))
-         self.local_weight = nn.Parameter(torch.tensor(0.5))
-         self.dw_conv = nn.Conv2d(channels, channels, 3, 
-                               padding=1, groups=channels)
- 
-     def forward(self, local, global_feat):
-         # 通道注意力增强局部特征
-         local_att = self.channel_att(local) * local
-         # 空间注意力增强全局特征
-         global_att = self.spatial_att(global_feat) * global_feat
-         # 动态权重融合
-         w_g = torch.sigmoid(self.global_weight)
-         w_l = torch.sigmoid(self.local_weight)
-         fused = self.dw_conv(w_g*global_att + w_l*local_att)
-         return fused
+    def __init__(self, channels):
+        super().__init__()
+        # 动态权重参数：用于平衡局部与全局特征
+        self.global_weight = nn.Parameter(torch.tensor(0.5))
+        self.local_weight = nn.Parameter(torch.tensor(0.5))
+        # 深度可分离卷积，用于融合后处理
+        self.dw_conv = nn.Conv2d(channels, channels, 3, padding=1, groups=channels)
+        self.norm = nn.BatchNorm2d(channels)
+        self.act = nn.ReLU(inplace=True)
 
-# --------------------------- 修改层级融合模块 ---------------------------
+    def forward(self, local, global_feat):
+        """
+        local: 局部分支输出，已包含通道注意力
+        global_feat: 全局分支输出，已包含空间注意力
+        """
+        # 使用 sigmoid 将权重限制在 [0, 1]
+        w_g = torch.sigmoid(self.global_weight)
+        w_l = torch.sigmoid(self.local_weight)
+
+        # 加权融合
+        fused = w_g * global_feat + w_l * local
+
+        # 后处理：卷积 + BN + ReLU
+        fused = self.dw_conv(fused)
+        fused = self.norm(fused)
+        fused = self.act(fused)
+
+        return fused
+
+
+# --------------------------- 层级融合模块 ---------------------------
 class HierarchicalFusion(nn.Module):
     def __init__(self, in_channels, d_model):
         super().__init__()
-        self.local_branch = nn.Sequential(
-            DeformConv2d(in_channels, d_model, 3, padding=1),
-            nn.BatchNorm2d(d_model),
-            nn.ReLU(inplace=True)
-        )
-        self.global_branch = nn.Sequential(
-            nn.Conv2d(in_channels, d_model, 1),
-            nn.BatchNorm2d(d_model),
-            nn.ReLU(inplace=True),
-            TransformerUnit(d_model)
-        )
-
+        self.local_branch = LocalBranch(in_channels, d_model)
+        self.global_branch = GlobalBranch(in_channels, d_model)
         self.adaptive_fusion = AdaptiveFusion(d_model)
 
     def forward(self, x):
         local = self.local_branch(x)
         global_feat = self.global_branch(x)
-
         return self.adaptive_fusion(local, global_feat)
