@@ -1,0 +1,96 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from .backbone import _build_mobilenet_backbone, _get_output_channels
+from .fusion import HierarchicalFusion
+
+class LiteFER-HDF(nn.Module):
+    def __init__(self, num_classes=7, alpha=0.75, d_model=128):
+        super().__init__()
+        #alpha参数构建主干
+        self.backbone = self._build_mobilenet_backbone(alpha)
+        fusion_indices = [3, 6, 9]  # 在指定层后添加融合点
+        fusion_channels = [self._get_output_channels(self.backbone[idx]) for idx in fusion_indices]
+
+        self.fusion_layers = nn.ModuleList([
+            HierarchicalFusion(c, d_model) for c in fusion_channels
+        ])
+
+        self.fusion_linear = nn.Linear(len(fusion_indices), len(fusion_indices))
+
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Dropout(0.3),
+            nn.Linear(d_model, num_classes)
+        )
+
+    def _build_mobilenet_backbone(self, alpha):
+        """根据alpha参数构建并缩放MobileNetV2主干"""
+        backbone = mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1).features
+        # 移除索引10及之后的层（高层特征模拟器）
+        backbone = nn.Sequential(*list(backbone.children())[:10])  # 保留0-9层
+        
+        def scale_channels(channels):
+            return max(8, int(math.ceil(channels * alpha / 8)) * 8)
+        
+        for name, layer in backbone.named_children():
+            if isinstance(layer, nn.Conv2d):
+                original_out_channels = layer.out_channels
+                layer.out_channels = scale_channels(original_out_channels)
+            elif hasattr(layer, 'conv'):
+                for sub_layer_name, sub_layer in layer.conv.named_children():
+                    if isinstance(sub_layer, nn.Conv2d):
+                        original_in_channels = sub_layer.in_channels
+                        original_out_channels = sub_layer.out_channels
+                        sub_layer.in_channels = scale_channels(original_in_channels)
+                        sub_layer.out_channels = scale_channels(original_out_channels)
+        return backbone
+    
+    @staticmethod
+    def _get_output_channels(layer):
+        if hasattr(layer, 'out_channels'):
+            return layer.out_channels
+        elif hasattr(layer, 'conv') and isinstance(layer.conv[-1], nn.Conv2d):
+            return layer.conv[-1].out_channels
+        else:
+            raise ValueError("无法确定层的输出通道数")
+
+    def forward(self, x):
+        fusion_outputs = []
+        current_fusion_idx = 0
+
+        for i, layer in enumerate(self.backbone):
+            x = layer(x)
+            if i in [3, 6, 9]:  # 在指定层后执行融合
+                fused = self.fusion_layers[current_fusion_idx](x)
+                fusion_outputs.append(fused)
+                current_fusion_idx += 1
+
+        final_feat = self._aggregate_features(fusion_outputs)
+        return self.classifier(final_feat)
+
+    def _aggregate_features(self, features):
+        resized_features = []
+        target_size = features[-1].shape[-2:]
+
+        for feat in features:
+            if feat.shape[-2:] != target_size:
+                feat = nn.functional.interpolate(feat, size=target_size, mode='bilinear', align_corners=False)
+            resized_features.append(feat)
+
+        spatial_att = torch.cat([f.mean(dim=1, keepdim=True) for f in resized_features], dim=1)
+        spatial_att = nn.AdaptiveAvgPool2d((1, 1))(spatial_att)
+        spatial_att = spatial_att.view(spatial_att.size(0), -1)
+
+        spatial_att = self.fusion_linear(spatial_att)
+        spatial_att = nn.Softmax(dim=1)(spatial_att)
+
+        spatial_att = spatial_att.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # [B, N, 1, 1, 1]
+        spatial_att = spatial_att.permute(1, 0, 2, 3, 4)  # [N, B, 1, 1, 1]
+
+        stacked = torch.stack(resized_features)  # [N, B, C, H, W]
+
+        weighted_sum = torch.sum(stacked * spatial_att, dim=0)  # [B, C, H, W]
+
+        return weighted_sum
