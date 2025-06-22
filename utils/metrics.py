@@ -1,34 +1,50 @@
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 
 def evaluate_model(model, device, data_loader):
-    """评估模型性能"""
+    """评估模型"""
     model.eval()
-    all_preds, all_labels = [], []
-    
+    true_labels = []
+    pred_labels = []
     with torch.no_grad():
         for batch in data_loader:
-            inputs = batch['image'].to(device)
-            labels = batch['label'].to(device)
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-    
-    return np.array(all_labels), np.array(all_preds)
+            images = batch['image'].to(device)
+            labels = batch['label'].cpu().numpy()
+            
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            
+            true_labels.extend(labels)
+            pred_labels.extend(predicted.cpu().numpy())
+    return np.array(true_labels), np.array(pred_labels)
 
-def plot_confusion_matrix(true_labels, pred_labels, classes, title='Confusion Matrix'):
-    """绘制混淆矩阵"""
-    cm = confusion_matrix(true_labels, pred_labels)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=classes, yticklabels=classes)
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.title(title)
-    plt.show()
-    
-    print(classification_report(true_labels, pred_labels, target_names=classes))
-    print(f"Overall Accuracy: {accuracy_score(true_labels, pred_labels):.4f}")
+def calculate_metrics(true_labels, pred_labels, classes=None):
+    """计算多种评估指标"""
+    accuracy = accuracy_score(true_labels, pred_labels)
+    precision = precision_score(true_labels, pred_labels, average='macro')
+    recall = recall_score(true_labels, pred_labels, average='macro')
+    f1 = f1_score(true_labels, pred_labels, average='macro')
+    metrics = {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1
+    }
+    if classes is not None:
+        cm = confusion_matrix(true_labels, pred_labels)
+        metrics['confusion_matrix'] = cm
+        #计算每类精确率
+        class_precision = precision_score(true_labels, pred_labels, average=None)
+        #计算每类召回率
+        class_recall = recall_score(true_labels, pred_labels, average=None)
+        #计算每类F1分数
+        class_f1 = f1_score(true_labels, pred_labels, average=None)
+        class_metrics = {}
+        for i, class_name in enumerate(classes):
+            class_metrics[class_name] = {
+                'precision': class_precision[i],
+                'recall': class_recall[i],
+                'f1': class_f1[i]
+            }
+        metrics['class_metrics'] = class_metrics
+    return metrics
