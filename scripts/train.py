@@ -5,7 +5,7 @@ import os
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from models import LiteFER_HDF, LiteFER-HDF, LiteFER-HDF_NoTransformer, LiteFER-HDF_NoDeform, LiteFER-HDF_NoAttention
-from models.datasets import load_dataset  
+from data.datasets import load_dataset  
 from utils.metrics import accuracy_score
 from utils.visualization import plot_training_history
 # === 训练函数实现 ===
